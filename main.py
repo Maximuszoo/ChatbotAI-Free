@@ -1,383 +1,498 @@
 """
-Main Application - Voice Chatbot with PyQt6
-Multi-threaded architecture to prevent UI freezing
+Voice Chatbot - Google Gemini Inspired UI
+Walkie-Talkie Mode: Manual control of recording
 """
 
 import sys
+import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
-    QHBoxLayout, QLabel, QScrollArea, QPushButton
+    QHBoxLayout, QLabel, QScrollArea, QPushButton, 
+    QComboBox, QFrame, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer
 from PyQt6.QtGui import QFont
 
-from styles import DARK_STYLE
+from styles import GEMINI_STYLE, COLORS
 from audio_utils import AudioRecorder, AudioPlayer
 from ai_manager import AIManager
+import ollama
 
 
-class ListenerThread(QThread):
-    """Thread for continuous microphone listening"""
+def get_available_ollama_models():
+    """Get list of available Ollama models"""
+    try:
+        response = ollama.list()
+        model_names = [model.model for model in response.models]
+        print(f"Found Ollama models: {model_names}")
+        return model_names if model_names else ['llama3.1:8b']
+    except Exception as e:
+        print(f"Error getting Ollama models: {e}")
+        return ['llama3.1:8b']
+
+
+class ManualRecorderThread(QThread):
+    """Thread for manual recording (walkie-talkie style)"""
     
-    audio_detected = pyqtSignal(object)  # Emits recorded audio data
+    recording_finished = pyqtSignal(object)  # Emits recorded audio data
     
     def __init__(self, recorder):
         super().__init__()
         self.recorder = recorder
-        self.is_running = False
+        self.is_recording = False
+        self.audio_chunks = []
     
     def run(self):
-        """Continuously listen for speech"""
-        self.is_running = True
+        """Record until stop() is called"""
+        self.is_recording = True
+        self.audio_chunks = []
         self.recorder.start_stream()
         
-        while self.is_running:
-            audio_data = self.recorder.record_until_silence()
-            
-            if audio_data is not None and len(audio_data) > 0:
-                self.audio_detected.emit(audio_data)
-            
-            if not self.is_running:
-                break
+        print("🎤 Recording started...")
+        
+        while self.is_recording:
+            try:
+                chunk = self.recorder.audio_queue.get(timeout=0.1)
+                self.audio_chunks.append(chunk)
+            except:
+                continue
         
         self.recorder.stop_stream()
+        
+        if self.audio_chunks:
+            audio_data = np.concatenate(self.audio_chunks, axis=0).flatten()
+            duration = len(audio_data) / self.recorder.sample_rate
+            print(f"🎤 Recording stopped. Duration: {duration:.2f}s")
+            
+            # Only emit if we have meaningful audio (> 0.5 seconds)
+            if duration > 0.5:
+                self.recording_finished.emit(audio_data)
+            else:
+                print("Recording too short, discarding")
+                self.recording_finished.emit(None)
+        else:
+            self.recording_finished.emit(None)
     
-    def stop(self):
-        """Stop the listening thread"""
-        self.is_running = False
+    def stop_recording(self):
+        """Stop the recording"""
+        self.is_recording = False
 
 
 class WorkerThread(QThread):
     """Thread for processing: Transcribe -> Think -> Speak"""
     
-    status_changed = pyqtSignal(str)  # Status updates
-    user_message = pyqtSignal(str)    # User's transcribed message
-    bot_message = pyqtSignal(str)     # Bot's text response
-    playback_started = pyqtSignal()   # When audio playback begins
-    playback_finished = pyqtSignal()  # When audio playback ends
+    status_changed = pyqtSignal(str)
+    user_message = pyqtSignal(str)
+    bot_message = pyqtSignal(str)
+    processing_complete = pyqtSignal()
     
-    def __init__(self, ai_manager, audio_player, audio_recorder):
+    def __init__(self, ai_manager, audio_player):
         super().__init__()
         self.ai_manager = ai_manager
         self.audio_player = audio_player
-        self.audio_recorder = audio_recorder
-        self.audio_queue = []
-        self.is_running = False
+        self.audio_data = None
     
-    def add_audio(self, audio_data):
-        """Add audio data to processing queue"""
-        self.audio_queue.append(audio_data)
+    def set_audio(self, audio_data):
+        """Set audio data to process"""
+        self.audio_data = audio_data
     
     def run(self):
-        """Process audio queue"""
-        self.is_running = True
-        
-        while self.is_running:
-            if self.audio_queue:
-                audio_data = self.audio_queue.pop(0)
-                self._process_audio(audio_data)
-            else:
-                self.msleep(100)  # Sleep briefly if no audio to process
-    
-    def _process_audio(self, audio_data):
-        """Process a single audio chunk through the pipeline"""
+        """Process the audio through the pipeline"""
+        if self.audio_data is None:
+            self.processing_complete.emit()
+            return
         
         # Step 1: Transcribe
-        self.status_changed.emit("Thinking...")
-        user_text = self.ai_manager.transcribe(audio_data)
+        self.status_changed.emit("Transcribing...")
+        user_text = self.ai_manager.transcribe(self.audio_data)
         
         if not user_text:
-            self.status_changed.emit("Listening...")
+            self.status_changed.emit("Ready")
+            self.processing_complete.emit()
             return
         
         self.user_message.emit(user_text)
         
         # Step 2: Get LLM response
+        self.status_changed.emit("Thinking...")
         bot_text = self.ai_manager.get_llm_response(user_text)
         self.bot_message.emit(bot_text)
         
-        # Step 3: Generate speech
+        # Step 3: Generate and play speech
         self.status_changed.emit("Speaking...")
         audio_output, sample_rate = self.ai_manager.text_to_speech(bot_text)
         
-        if audio_output is None or len(audio_output) == 0:
-            print("No audio generated, skipping playback")
-            self.status_changed.emit("Listening...")
-            return
+        if audio_output is not None and len(audio_output) > 0:
+            self.audio_player.play(audio_output, sample_rate)
         
-        # Step 4: Play audio (pause recording to prevent feedback)
-        self.audio_recorder.pause_recording()
-        self.playback_started.emit()
-        
-        self.audio_player.play(audio_output, sample_rate)
-        
-        self.playback_finished.emit()
-        self.audio_recorder.resume_recording()
-        
-        self.status_changed.emit("Listening...")
-    
-    def stop(self):
-        """Stop the worker thread"""
-        self.is_running = False
+        self.status_changed.emit("Ready")
+        self.processing_complete.emit()
 
 
-class ChatBubble(QLabel):
-    """Custom chat bubble widget"""
+class ChatBubble(QFrame):
+    """Modern chat bubble widget"""
     
     def __init__(self, text, is_user=False):
-        super().__init__(text)
-        
-        self.setWordWrap(True)
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        super().__init__()
         
         if is_user:
-            self.setProperty("class", "user_message")
-            self.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self.setObjectName("userBubble")
+            self.setStyleSheet("background-color: #004A77; border-radius: 20px;")
         else:
-            self.setProperty("class", "bot_message")
-            self.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            self.setObjectName("botBubble")
+            self.setStyleSheet("background-color: #1E1F20; border-radius: 20px;")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        label = QLabel(text)
+        label.setObjectName("bubbleText")
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setStyleSheet("""
+            color: #E3E3E3;
+            font-size: 15px;
+            padding: 14px 18px;
+            background: transparent;
+        """)
+        
+        layout.addWidget(label)
         
         self.setMaximumWidth(600)
 
 
 class MainWindow(QMainWindow):
-    """Main application window"""
+    """Main application window - Gemini Style"""
     
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("Voice Chatbot - AI Assistant")
-        self.setGeometry(100, 100, 900, 700)
+        self.setWindowTitle("Voice Chat AI")
+        self.setGeometry(100, 100, 500, 800)
+        self.setMinimumSize(400, 600)
         
-        # Initialize audio components
+        # State
+        self.is_recording = False
+        self.is_processing = False
+        
+        # Initialize components
         self.recorder = AudioRecorder()
         self.player = AudioPlayer()
+        self.recorder_thread = None
+        self.worker_thread = None
         
-        # Initialize AI Manager (loads all models)
-        self.status_label = None  # Will be created in init_ui
-        self.update_status("Initializing AI models...")
-        
+        # Load AI Manager
+        print("Loading AI models...")
         try:
             self.ai_manager = AIManager()
         except Exception as e:
-            print(f"Error initializing AI Manager: {e}")
-            self.show_error_and_exit(str(e))
-            return
-        
-        # Initialize threads
-        self.listener_thread = None
-        self.worker_thread = None
+            print(f"Error initializing AI: {e}")
+            self.ai_manager = None
         
         # Setup UI
         self.init_ui()
+        self.setStyleSheet(GEMINI_STYLE)
         
-        # Apply styles
-        self.setStyleSheet(DARK_STYLE)
-        
-        # Auto-start listening
-        self.start_listening()
+        # Recording animation timer
+        self.pulse_timer = QTimer()
+        self.pulse_timer.timeout.connect(self.update_recording_animation)
+        self.pulse_state = 0
     
     def init_ui(self):
-        """Initialize the user interface"""
+        """Initialize the Gemini-inspired UI"""
         
-        # Central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
-        # Main layout
-        main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        # ===== HEADER =====
+        header = QWidget()
+        header.setObjectName("headerWidget")
+        header.setFixedHeight(70)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 15, 20, 15)
         
-        # Status indicator
+        # Model Selector (centered)
+        header_layout.addStretch()
+        
+        self.model_selector = QComboBox()
+        self.model_selector.setObjectName("modelSelector")
+        available_models = get_available_ollama_models()
+        self.model_selector.addItems(available_models)
+        
+        # Set current model
+        if self.ai_manager:
+            current = self.ai_manager.ollama_model
+            idx = self.model_selector.findText(current)
+            if idx >= 0:
+                self.model_selector.setCurrentIndex(idx)
+        
+        self.model_selector.currentTextChanged.connect(self.on_model_changed)
+        header_layout.addWidget(self.model_selector)
+        
+        header_layout.addStretch()
+        
+        main_layout.addWidget(header)
+        
+        # ===== CHAT AREA =====
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self.chat_widget = QWidget()
+        self.chat_widget.setObjectName("chatContainer")
+        self.chat_layout = QVBoxLayout(self.chat_widget)
+        self.chat_layout.setContentsMargins(16, 16, 16, 16)
+        self.chat_layout.setSpacing(12)
+        self.chat_layout.addStretch()
+        
+        scroll.setWidget(self.chat_widget)
+        self.scroll_area = scroll
+        main_layout.addWidget(scroll, 1)
+        
+        # ===== INPUT BAR =====
+        input_bar = QWidget()
+        input_bar.setObjectName("inputBar")
+        input_bar.setFixedHeight(120)
+        input_layout = QVBoxLayout(input_bar)
+        input_layout.setContentsMargins(20, 15, 20, 20)
+        input_layout.setSpacing(10)
+        
+        # Status label
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setProperty("class", "status_idle")
-        main_layout.addWidget(self.status_label)
+        input_layout.addWidget(self.status_label)
         
-        # Chat scroll area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Button row
+        button_row = QHBoxLayout()
+        button_row.setSpacing(20)
         
-        # Chat container
-        self.chat_widget = QWidget()
-        self.chat_widget.setObjectName("chatContainer")
-        self.chat_layout = QVBoxLayout()
-        self.chat_layout.addStretch()
-        self.chat_widget.setLayout(self.chat_layout)
+        # Clear button (left)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setObjectName("clearButton")
+        self.clear_btn.clicked.connect(self.clear_chat)
+        self.clear_btn.setFixedWidth(80)
+        button_row.addWidget(self.clear_btn)
         
-        scroll_area.setWidget(self.chat_widget)
-        main_layout.addWidget(scroll_area)
+        button_row.addStretch()
         
-        # Store scroll area reference for auto-scrolling
-        self.scroll_area = scroll_area
+        # MIC BUTTON (center) - The star of the show
+        self.mic_btn = QPushButton("🎤")
+        self.mic_btn.setObjectName("micButton")
+        self.mic_btn.clicked.connect(self.toggle_recording)
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        button_row.addWidget(self.mic_btn)
         
-        # Control buttons
-        button_layout = QHBoxLayout()
+        button_row.addStretch()
         
-        self.start_button = QPushButton("Start Listening")
-        self.start_button.setObjectName("startButton")
-        self.start_button.clicked.connect(self.start_listening)
+        # Spacer for symmetry
+        spacer = QWidget()
+        spacer.setFixedWidth(80)
+        button_row.addWidget(spacer)
         
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.setObjectName("stopButton")
-        self.stop_button.clicked.connect(self.stop_listening)
-        self.stop_button.setEnabled(False)
+        input_layout.addLayout(button_row)
+        main_layout.addWidget(input_bar)
         
-        self.clear_button = QPushButton("Clear Chat")
-        self.clear_button.clicked.connect(self.clear_chat)
-        
-        button_layout.addWidget(self.start_button)
-        button_layout.addWidget(self.stop_button)
-        button_layout.addWidget(self.clear_button)
-        
-        main_layout.addLayout(button_layout)
-        
-        # Add welcome message
-        self.add_bot_message("Hello! I'm your AI voice assistant. Start speaking anytime!")
+        # Welcome message
+        self.add_bot_message("Hello! Tap the microphone and speak. Tap again when you're done.")
     
-    def start_listening(self):
-        """Start the listening and processing threads"""
+    def toggle_recording(self):
+        """Toggle between recording and not recording"""
         
-        if self.listener_thread is not None and self.listener_thread.isRunning():
+        if self.is_processing:
             return
         
-        # Create listener thread
-        self.listener_thread = ListenerThread(self.recorder)
-        self.listener_thread.audio_detected.connect(self.on_audio_detected)
+        if self.is_recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+    
+    def start_recording(self):
+        """Start manual recording"""
         
-        # Create worker thread
-        self.worker_thread = WorkerThread(self.ai_manager, self.player, self.recorder)
+        if self.ai_manager is None:
+            self.status_label.setText("AI not loaded!")
+            return
+        
+        self.is_recording = True
+        
+        # Update UI
+        self.mic_btn.setText("⏹")
+        self.mic_btn.setStyleSheet("""
+            QPushButton#micButton {
+                background-color: #EA4335;
+                color: white;
+                border: none;
+                border-radius: 32px;
+                min-width: 64px;
+                max-width: 64px;
+                min-height: 64px;
+                max-height: 64px;
+                font-size: 26px;
+            }
+            QPushButton#micButton:hover {
+                background-color: #F44336;
+            }
+        """)
+        self.status_label.setText("🔴 Recording... Tap to send")
+        
+        # Start recording thread
+        self.recorder_thread = ManualRecorderThread(self.recorder)
+        self.recorder_thread.recording_finished.connect(self.on_recording_finished)
+        self.recorder_thread.start()
+        
+        # Start pulse animation
+        self.pulse_timer.start(500)
+    
+    def stop_recording(self):
+        """Stop recording and process"""
+        
+        self.is_recording = False
+        self.pulse_timer.stop()
+        
+        # Update UI
+        self.mic_btn.setText("🎤")
+        self.mic_btn.setStyleSheet("""
+            QPushButton#micButton {
+                background-color: #1A73E8;
+                color: white;
+                border: none;
+                border-radius: 32px;
+                min-width: 64px;
+                max-width: 64px;
+                min-height: 64px;
+                max-height: 64px;
+                font-size: 26px;
+            }
+            QPushButton#micButton:hover {
+                background-color: #4285F4;
+            }
+        """)
+        
+        # Stop the recorder thread
+        if self.recorder_thread and self.recorder_thread.isRunning():
+            self.recorder_thread.stop_recording()
+    
+    def update_recording_animation(self):
+        """Pulse animation for recording state"""
+        self.pulse_state = (self.pulse_state + 1) % 2
+        if self.pulse_state == 0:
+            self.status_label.setText("🔴 Recording... Tap to send")
+        else:
+            self.status_label.setText("⚫ Recording... Tap to send")
+    
+    @pyqtSlot(object)
+    def on_recording_finished(self, audio_data):
+        """Handle finished recording"""
+        
+        if audio_data is None:
+            self.status_label.setText("Ready")
+            return
+        
+        self.is_processing = True
+        self.mic_btn.setEnabled(False)
+        self.status_label.setText("Processing...")
+        
+        # Start worker thread
+        self.worker_thread = WorkerThread(self.ai_manager, self.player)
+        self.worker_thread.set_audio(audio_data)
         self.worker_thread.status_changed.connect(self.update_status)
         self.worker_thread.user_message.connect(self.add_user_message)
         self.worker_thread.bot_message.connect(self.add_bot_message)
-        
-        # Start threads
-        self.listener_thread.start()
+        self.worker_thread.processing_complete.connect(self.on_processing_complete)
         self.worker_thread.start()
-        
-        # Update UI
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.update_status("Listening...")
     
-    def stop_listening(self):
-        """Stop all threads"""
-        
-        self.update_status("Stopping...")
-        
-        # Stop listener thread
-        if self.listener_thread is not None:
-            self.listener_thread.stop()
-            self.listener_thread.wait()
-            self.listener_thread = None
-        
-        # Stop worker thread
-        if self.worker_thread is not None:
-            self.worker_thread.stop()
-            self.worker_thread.wait()
-            self.worker_thread = None
-        
-        # Stop any audio playback
-        self.player.stop()
-        
-        # Update UI
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.update_status("Stopped")
-    
-    @pyqtSlot(object)
-    def on_audio_detected(self, audio_data):
-        """Handle audio detected by listener thread"""
-        if self.worker_thread is not None:
-            self.worker_thread.add_audio(audio_data)
+    @pyqtSlot()
+    def on_processing_complete(self):
+        """Called when processing is done"""
+        self.is_processing = False
+        self.mic_btn.setEnabled(True)
+        self.status_label.setText("Ready")
     
     @pyqtSlot(str)
     def update_status(self, status):
         """Update status label"""
-        if self.status_label is None:
-            print(f"Status: {status}")
-            return
-            
         self.status_label.setText(status)
-        
-        # Update status color
-        if "Listening" in status:
-            self.status_label.setProperty("class", "status_listening")
-        elif "Thinking" in status:
-            self.status_label.setProperty("class", "status_thinking")
-        elif "Speaking" in status:
-            self.status_label.setProperty("class", "status_speaking")
-        else:
-            self.status_label.setProperty("class", "status_idle")
-        
-        # Force style update
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+    
+    @pyqtSlot(str)
+    def on_model_changed(self, model_name):
+        """Handle model selection change"""
+        if self.ai_manager:
+            self.ai_manager.ollama_model = model_name
+            print(f"Switched to: {model_name}")
+            self.add_bot_message(f"[Model: {model_name}]")
     
     @pyqtSlot(str)
     def add_user_message(self, message):
-        """Add user message bubble to chat"""
+        """Add user bubble"""
+        wrapper = QWidget()
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(60, 0, 12, 0)
+        wrapper_layout.addStretch()
+        
         bubble = ChatBubble(message, is_user=True)
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        wrapper_layout.addWidget(bubble)
+        
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
         self.scroll_to_bottom()
     
     @pyqtSlot(str)
     def add_bot_message(self, message):
-        """Add bot message bubble to chat"""
+        """Add bot bubble"""
+        wrapper = QWidget()
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(12, 0, 60, 0)
+        
         bubble = ChatBubble(message, is_user=False)
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        wrapper_layout.addWidget(bubble)
+        wrapper_layout.addStretch()
+        
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
         self.scroll_to_bottom()
     
     def scroll_to_bottom(self):
-        """Scroll chat to bottom"""
-        scrollbar = self.scroll_area.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        """Scroll to bottom of chat"""
+        QTimer.singleShot(100, lambda: 
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().maximum()
+            )
+        )
     
     def clear_chat(self):
-        """Clear all chat messages"""
-        # Remove all message bubbles except the stretch
+        """Clear all messages"""
         while self.chat_layout.count() > 1:
             item = self.chat_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         
-        # Reset conversation history
-        self.ai_manager.reset_conversation()
+        if self.ai_manager:
+            self.ai_manager.reset_conversation()
         
-        # Add welcome message
-        self.add_bot_message("Chat cleared. Ready for a new conversation!")
-    
-    def show_error_and_exit(self, error_message):
-        """Show error message and exit"""
-        from PyQt6.QtWidgets import QMessageBox
-        
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setText("Initialization Error")
-        msg.setInformativeText(error_message)
-        msg.setWindowTitle("Error")
-        msg.exec()
-        
-        sys.exit(1)
+        self.add_bot_message("Chat cleared. Tap the mic to start a new conversation!")
     
     def closeEvent(self, event):
-        """Handle window close event"""
-        self.stop_listening()
+        """Cleanup on close"""
+        if self.recorder_thread and self.recorder_thread.isRunning():
+            self.recorder_thread.stop_recording()
+            self.recorder_thread.wait()
+        
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker_thread.wait()
+        
         event.accept()
 
 
 def main():
-    """Main application entry point"""
-    
     app = QApplication(sys.argv)
     
-    # Set application font
-    font = QFont("Segoe UI", 10)
+    font = QFont("Google Sans", 10)
+    font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
     
-    # Create and show main window
     window = MainWindow()
     window.show()
     

@@ -13,16 +13,18 @@ from collections import deque
 class AudioRecorder:
     """Records audio with Voice Activity Detection"""
     
-    def __init__(self, sample_rate=16000, silence_threshold=0.015, silence_duration=1.5):
+    def __init__(self, sample_rate=16000, silence_threshold=0.03, silence_duration=3.0, min_audio_duration=1.0):
         """
         Args:
             sample_rate: Audio sample rate (Hz)
-            silence_threshold: RMS threshold for silence detection
+            silence_threshold: RMS threshold for silence detection (increased to avoid noise)
             silence_duration: Seconds of silence before stopping recording
+            min_audio_duration: Minimum audio duration in seconds to process
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
+        self.min_audio_duration = min_audio_duration
         
         self.audio_queue = queue.Queue()
         self.is_recording = False
@@ -39,12 +41,20 @@ class AudioRecorder:
     
     def start_stream(self):
         """Start the audio input stream"""
+        # Clear any existing audio in the queue
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        
         if self.stream is None:
             self.stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype='float32',
-                callback=self._audio_callback
+                callback=self._audio_callback,
+                blocksize=1024
             )
             self.stream.start()
             print("Audio stream started")
@@ -72,6 +82,11 @@ class AudioRecorder:
             except queue.Empty:
                 break
         print("Recording resumed")
+    
+    def set_silence_duration(self, duration):
+        """Update silence duration threshold"""
+        self.silence_duration = duration
+        print(f"Silence duration set to {duration} seconds")
     
     def record_until_silence(self, max_duration=30):
         """
@@ -129,7 +144,17 @@ class AudioRecorder:
         # Concatenate all audio chunks
         audio_data = np.concatenate(audio_buffer, axis=0).flatten()
         
-        return audio_data if speech_detected else None
+        if not speech_detected:
+            return None
+        
+        # Check minimum duration (filter out clicks, breaths, noise)
+        audio_duration = len(audio_data) / self.sample_rate
+        if audio_duration < self.min_audio_duration:
+            print(f"Audio too short ({audio_duration:.2f}s < {self.min_audio_duration}s), discarding")
+            return None
+        
+        print(f"Recorded {audio_duration:.2f}s of audio")
+        return audio_data
 
 
 class AudioPlayer:

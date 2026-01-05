@@ -106,9 +106,17 @@ class AIManager:
             sample_rate: audio sample rate
             
         Returns:
-            Transcribed text string
+            Transcribed text string or empty string if filtered out
         """
         print("Transcribing audio...")
+        
+        # List of common Whisper hallucinations to filter out
+        HALLUCINATION_PHRASES = [
+            'you', 'thank you', 'thanks', 'subtitle', 'subtitles',
+            'mbc', 'bbc', 'thank you for watching', 'thanks for watching',
+            'please subscribe', 'like and subscribe', 'bye', 'goodbye',
+            'see you next time', 'see you', '.', '...'
+        ]
         
         try:
             # Ensure audio is float32
@@ -119,12 +127,25 @@ class AIManager:
                 audio_data,
                 language="en",
                 beam_size=5,
-                vad_filter=True
+                vad_filter=True,
+                condition_on_previous_text=False  # Prevent hallucinations from context
             )
             
             # Combine all segments
             text = " ".join([segment.text for segment in segments])
             text = text.strip()
+            
+            # Sanitization: Remove common hallucinations
+            text_clean = text.lower().strip().strip('.,!?;:')
+            
+            if text_clean in HALLUCINATION_PHRASES:
+                print(f"Filtered hallucination: '{text}'")
+                return ""
+            
+            # Check minimum length (at least 2 characters)
+            if len(text_clean) < 2:
+                print(f"Text too short, discarding: '{text}'")
+                return ""
             
             print(f"Transcription: {text}")
             return text

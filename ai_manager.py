@@ -156,7 +156,7 @@ class AIManager:
     
     def get_llm_response(self, user_text):
         """
-        Get response from Ollama LLM
+        Get response from Ollama LLM (non-streaming version for compatibility)
         
         Args:
             user_text: User's message
@@ -193,6 +193,87 @@ class AIManager:
             
             print(f"Bot response: {bot_response[:100]}...")
             return bot_response
+            
+        except Exception as e:
+            print(f"LLM error: {e}")
+            return "I'm sorry, I couldn't process that request."
+    
+    def get_llm_response_streaming(self, user_text, on_chunk=None, on_sentence=None):
+        """
+        Get response from Ollama LLM with streaming support
+        
+        Args:
+            user_text: User's message
+            on_chunk: Callback for each token chunk (full_text_so_far)
+            on_sentence: Callback when a complete sentence is ready (sentence_text)
+            
+        Returns:
+            Bot's full response text
+        """
+        print("Getting LLM response (streaming)...")
+        
+        try:
+            # Add user message to history
+            self.conversation_history.append({
+                "role": "user",
+                "content": user_text
+            })
+            
+            # Keep only last 10 messages to save memory
+            if len(self.conversation_history) > 10:
+                self.conversation_history = self.conversation_history[-10:]
+            
+            # Stream response from Ollama
+            full_response = ""
+            current_sentence = ""
+            sentence_delimiters = {'.', '!', '?', '\n'}
+            
+            stream = ollama.chat(
+                model=self.ollama_model,
+                messages=self.conversation_history,
+                stream=True
+            )
+            
+            for chunk in stream:
+                token = chunk['message']['content']
+                full_response += token
+                current_sentence += token
+                
+                # Notify about new text chunk for UI update
+                if on_chunk:
+                    on_chunk(full_response)
+                
+                # Check if we have a complete sentence
+                # Look for sentence-ending punctuation followed by space or end
+                for delim in sentence_delimiters:
+                    if delim in current_sentence:
+                        # Split on delimiter, keeping the delimiter
+                        parts = current_sentence.split(delim)
+                        
+                        # Process complete sentences (all but possibly the last part)
+                        for i, part in enumerate(parts[:-1]):
+                            complete_sentence = part.strip() + delim
+                            if complete_sentence.strip() and len(complete_sentence.strip()) > 1:
+                                if on_sentence:
+                                    on_sentence(complete_sentence)
+                        
+                        # Keep the remainder for the next iteration
+                        current_sentence = parts[-1]
+                        break
+            
+            # Handle any remaining text as final sentence
+            if current_sentence.strip():
+                if on_sentence:
+                    on_sentence(current_sentence.strip())
+            
+            # Add bot response to history
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": full_response
+            })
+            
+            print(f"Bot response complete: {full_response[:100]}...")
+            return full_response
             
         except Exception as e:
             print(f"LLM error: {e}")

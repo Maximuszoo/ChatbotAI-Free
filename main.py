@@ -83,11 +83,12 @@ class ManualRecorderThread(QThread):
 
 
 class WorkerThread(QThread):
-    """Thread for processing: Transcribe -> Think -> Speak"""
+    """Thread for processing: Transcribe -> Think -> Speak with real-time streaming"""
     
     status_changed = pyqtSignal(str)
     user_message = pyqtSignal(str)
     bot_message = pyqtSignal(str)
+    bot_message_update = pyqtSignal(str)  # For streaming text updates
     processing_complete = pyqtSignal()
     speaking_started = pyqtSignal()  # Signal when TTS starts playing
     
@@ -116,7 +117,7 @@ class WorkerThread(QThread):
         print("⚠️ Interrupted by user")
     
     def run(self):
-        """Process the audio or text through the pipeline"""
+        """Process the audio or text through the pipeline with streaming"""
         self.interrupted = False
         
         # Determine user text source
@@ -142,86 +143,111 @@ class WorkerThread(QThread):
             self.processing_complete.emit()
             return
         
-        # Step 2: Get LLM response
+        # Step 2 & 3: Stream LLM response and generate TTS in parallel
         self.status_changed.emit("Thinking...")
-        bot_text = self.ai_manager.get_llm_response(user_text)
-        self.bot_message.emit(bot_text)
         
-        if self.interrupted:
-            self.processing_complete.emit()
-            return
+        # Queue for sentences ready for TTS
+        sentence_queue = queue.Queue()
+        # Queue for audio ready to play
+        audio_queue = queue.Queue(maxsize=3)
         
-        # Step 3: Generate and play speech by paragraphs with parallel processing
-        self.status_changed.emit("Speaking...")
-        self.speaking_started.emit()  # Notify UI that speaking started
+        llm_complete = threading.Event()
+        tts_complete = threading.Event()
+        first_audio_ready = threading.Event()
         
-        # Split text into paragraphs
-        paragraphs = self._split_into_paragraphs(bot_text)
+        # Track the full response for history
+        full_response = [""]
+        bot_bubble_created = [False]
         
-        # Create a queue for audio chunks
-        audio_queue = queue.Queue(maxsize=3)  # Buffer up to 3 paragraphs
-        generation_complete = threading.Event()
+        def on_text_chunk(text_so_far):
+            """Called for each token - update UI in real-time"""
+            if self.interrupted:
+                return
+            full_response[0] = text_so_far
+            
+            # Create or update the bot bubble
+            if not bot_bubble_created[0]:
+                self.bot_message.emit(text_so_far)
+                bot_bubble_created[0] = True
+            else:
+                self.bot_message_update.emit(text_so_far)
         
-        # Thread function to generate audio chunks in parallel
-        def generate_audio():
-            for i, paragraph in enumerate(paragraphs):
+        def on_sentence_ready(sentence):
+            """Called when a complete sentence is ready for TTS"""
+            if self.interrupted:
+                return
+            clean_sentence = self._clean_markdown(sentence)
+            if clean_sentence.strip():
+                sentence_queue.put(clean_sentence)
+        
+        # Thread 1: Stream LLM response
+        def stream_llm():
+            try:
+                self.ai_manager.get_llm_response_streaming(
+                    user_text,
+                    on_chunk=on_text_chunk,
+                    on_sentence=on_sentence_ready
+                )
+            except Exception as e:
+                print(f"LLM streaming error: {e}")
+            finally:
+                llm_complete.set()
+        
+        # Thread 2: Generate TTS for sentences as they arrive
+        def generate_tts():
+            while not (llm_complete.is_set() and sentence_queue.empty()):
                 if self.interrupted:
                     break
                 
-                # Clean markdown from paragraph
-                clean_text = self._clean_markdown(paragraph)
-                
-                if not clean_text.strip():
+                try:
+                    sentence = sentence_queue.get(timeout=0.1)
+                    if sentence and not self.interrupted:
+                        audio_output, sample_rate = self.ai_manager.text_to_speech(sentence)
+                        if audio_output is not None and len(audio_output) > 0:
+                            audio_queue.put((audio_output, sample_rate))
+                            if not first_audio_ready.is_set():
+                                first_audio_ready.set()
+                except queue.Empty:
                     continue
-                
-                # Generate audio for this paragraph
-                audio_output, sample_rate = self.ai_manager.text_to_speech(clean_text)
-                
-                if audio_output is not None and len(audio_output) > 0:
-                    # Put audio in queue (will block if queue is full)
-                    try:
-                        audio_queue.put((audio_output, sample_rate), timeout=1.0)
-                    except queue.Full:
-                        if self.interrupted:
-                            break
+                except Exception as e:
+                    print(f"TTS error: {e}")
             
-            generation_complete.set()
+            tts_complete.set()
         
-        # Start generation thread
-        gen_thread = threading.Thread(target=generate_audio, daemon=True)
-        gen_thread.start()
+        # Start LLM and TTS threads
+        llm_thread = threading.Thread(target=stream_llm, daemon=True)
+        tts_thread = threading.Thread(target=generate_tts, daemon=True)
+        
+        llm_thread.start()
+        tts_thread.start()
+        
+        # Wait for first audio to be ready, then start playing
+        first_audio_ready.wait(timeout=30)  # Max 30 seconds for first response
+        
+        if not self.interrupted:
+            self.status_changed.emit("Speaking...")
+            self.speaking_started.emit()
         
         # Play audio chunks as they become available
-        while not (generation_complete.is_set() and audio_queue.empty()):
+        while not (tts_complete.is_set() and audio_queue.empty()):
             if self.interrupted:
                 break
             
             try:
-                audio_output, sample_rate = audio_queue.get(timeout=0.5)
+                audio_output, sample_rate = audio_queue.get(timeout=0.3)
                 if not self.interrupted:
                     self.audio_player.play(audio_output, sample_rate)
             except queue.Empty:
-                if generation_complete.is_set():
+                if tts_complete.is_set():
                     break
                 continue
         
-        # Wait for generation thread to finish
-        gen_thread.join(timeout=1.0)
+        # Wait for threads to finish
+        llm_thread.join(timeout=1.0)
+        tts_thread.join(timeout=1.0)
         
         self.status_changed.emit("Ready")
         self.processing_complete.emit()
-    
-    def _split_into_paragraphs(self, text):
-        """Split text into paragraphs for faster TTS streaming"""
-        # Split by double newline or single newline
-        paragraphs = text.replace('\r\n', '\n').split('\n\n')
-        
-        # If no double newlines, try single newlines
-        if len(paragraphs) == 1:
-            paragraphs = text.split('\n')
-        
-        # Filter out empty paragraphs
-        return [p.strip() for p in paragraphs if p.strip()]
     
     def _clean_markdown(self, text):
         """Remove markdown symbols like *, **, etc."""
@@ -274,6 +300,10 @@ class ChatBubble(QFrame):
         
         # Responsive: use size policy instead of fixed max width
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+    
+    def update_text(self, text):
+        """Update the bubble text content (for streaming)"""
+        self.label.setText(text)
     
     def update_font_size(self, font_size):
         """Update the font size of the bubble text"""
@@ -706,6 +736,7 @@ class MainWindow(QMainWindow):
         self.worker_thread.status_changed.connect(self.update_status)
         self.worker_thread.user_message.connect(self.add_user_message)
         self.worker_thread.bot_message.connect(self.add_bot_message)
+        self.worker_thread.bot_message_update.connect(self.update_bot_message)
         self.worker_thread.processing_complete.connect(self.on_processing_complete)
         self.worker_thread.speaking_started.connect(self.on_speaking_started)
         self.worker_thread.start()
@@ -844,6 +875,7 @@ class MainWindow(QMainWindow):
         self.worker_thread.status_changed.connect(self.update_status)
         self.worker_thread.user_message.connect(self.add_user_message)
         self.worker_thread.bot_message.connect(self.add_bot_message)
+        self.worker_thread.bot_message_update.connect(self.update_bot_message)
         self.worker_thread.processing_complete.connect(self.on_processing_complete)
         self.worker_thread.speaking_started.connect(self.on_speaking_started)
         self.worker_thread.start()
@@ -964,11 +996,22 @@ class MainWindow(QMainWindow):
         font_config = get_font_size_config(self.font_size_name)
         bubble = ChatBubble(message, is_user=False, font_size=font_config["bubble_text"])
         self.chat_bubbles.append(bubble)
+        self.current_bot_bubble = bubble  # Track for streaming updates
         wrapper_layout.addWidget(bubble)
         wrapper_layout.addStretch()
         
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
         self.scroll_to_bottom()
+    
+    @pyqtSlot(str)
+    def update_bot_message(self, message):
+        """Update the current bot bubble text (for streaming)"""
+        if hasattr(self, 'current_bot_bubble') and self.current_bot_bubble:
+            try:
+                self.current_bot_bubble.update_text(message)
+                self.scroll_to_bottom()
+            except RuntimeError:
+                pass  # Widget was deleted
     
     def scroll_to_bottom(self):
         """Scroll to bottom of chat"""

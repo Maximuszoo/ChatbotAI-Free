@@ -10,7 +10,8 @@ import queue
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QHBoxLayout, QLabel, QScrollArea, QPushButton, 
-    QComboBox, QFrame, QSpacerItem, QSizePolicy, QLineEdit
+    QComboBox, QFrame, QSpacerItem, QSizePolicy, QLineEdit,
+    QDialog, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer
 from PyQt6.QtGui import QFont
@@ -18,6 +19,7 @@ from PyQt6.QtGui import QFont
 from styles import GEMINI_STYLE, COLORS
 from audio_utils import AudioRecorder, AudioPlayer
 from ai_manager import AIManager
+from preferences import load_preferences, save_preferences, get_font_size_config, FONT_SIZES
 import ollama
 
 
@@ -247,9 +249,9 @@ class WorkerThread(QThread):
 
 
 class ChatBubble(QFrame):
-    """Modern chat bubble widget"""
+    """Modern chat bubble widget - responsive to window size"""
     
-    def __init__(self, text, is_user=False):
+    def __init__(self, text, is_user=False, font_size=15):
         super().__init__()
         
         if is_user:
@@ -262,20 +264,167 @@ class ChatBubble(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        label = QLabel(text)
-        label.setObjectName("bubbleText")
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setStyleSheet("""
+        self.label = QLabel(text)
+        self.label.setObjectName("bubbleText")
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.update_font_size(font_size)
+        
+        layout.addWidget(self.label)
+        
+        # Responsive: use size policy instead of fixed max width
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+    
+    def update_font_size(self, font_size):
+        """Update the font size of the bubble text"""
+        self.label.setStyleSheet(f"""
             color: #E3E3E3;
-            font-size: 15px;
+            font-size: {font_size}px;
             padding: 14px 18px;
             background: transparent;
         """)
+
+
+class SettingsDialog(QDialog):
+    """Settings dialog with font size options"""
+    
+    def __init__(self, parent=None, auto_send=True, font_size="medium"):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(350)
+        self.auto_send = auto_send
+        self.font_size = font_size
         
-        layout.addWidget(label)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
         
-        self.setMaximumWidth(600)
+        # Title
+        title = QLabel("⚙️ Settings")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #E3E3E3;")
+        layout.addWidget(title)
+        
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("background-color: #3C4043;")
+        layout.addWidget(separator)
+        
+        # Font size setting
+        font_label = QLabel("Font Size:")
+        font_label.setStyleSheet("font-size: 14px; color: #E3E3E3; margin-top: 10px;")
+        layout.addWidget(font_label)
+        
+        self.font_size_combo = QComboBox()
+        self.font_size_combo.addItems(["Small", "Medium", "Large"])
+        size_map = {"small": 0, "medium": 1, "large": 2}
+        self.font_size_combo.setCurrentIndex(size_map.get(font_size, 1))
+        self.font_size_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #282A2C;
+                color: #E3E3E3;
+                border: 1px solid #3C4043;
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-size: 13px;
+                min-width: 120px;
+            }
+            QComboBox:hover {
+                background-color: #3C4043;
+            }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 10px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #9AA0A6;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #282A2C;
+                color: #E3E3E3;
+                selection-background-color: #3C4043;
+                border: 1px solid #3C4043;
+                border-radius: 8px;
+                padding: 4px;
+            }
+        """)
+        layout.addWidget(self.font_size_combo)
+        
+        # Separator 2
+        separator2 = QFrame()
+        separator2.setFrameShape(QFrame.Shape.HLine)
+        separator2.setStyleSheet("background-color: #3C4043;")
+        layout.addWidget(separator2)
+        
+        # Voice mode setting
+        mode_label = QLabel("Voice Recording Mode:")
+        mode_label.setStyleSheet("font-size: 14px; color: #E3E3E3; margin-top: 10px;")
+        layout.addWidget(mode_label)
+        
+        self.auto_send_checkbox = QCheckBox("Send automatically after recording")
+        self.auto_send_checkbox.setChecked(auto_send)
+        self.auto_send_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #E3E3E3;
+                font-size: 13px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 2px solid #5F6368;
+                background-color: #202124;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #1A73E8;
+                border-color: #1A73E8;
+            }
+        """)
+        layout.addWidget(self.auto_send_checkbox)
+        
+        help_text = QLabel("When unchecked, transcribed text will appear in the input field for you to review before sending.")
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("font-size: 11px; color: #9AA0A6; margin-left: 26px;")
+        layout.addWidget(help_text)
+        
+        layout.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("Save & Close")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A73E8;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 24px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1557b0;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        
+        # Set dialog background
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #202124;
+            }
+        """)
+    
+    def get_auto_send(self):
+        return self.auto_send_checkbox.isChecked()
+    
+    def get_font_size(self):
+        size_names = ["small", "medium", "large"]
+        return size_names[self.font_size_combo.currentIndex()]
 
 
 class MainWindow(QMainWindow):
@@ -288,10 +437,16 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 500, 800)
         self.setMinimumSize(400, 600)
         
+        # Load user preferences
+        self.preferences = load_preferences()
+        
         # State
         self.is_recording = False
         self.is_processing = False
         self.is_speaking = False
+        self.auto_send = self.preferences.get("auto_send", True)
+        self.font_size_name = self.preferences.get("font_size", "medium")
+        self.chat_bubbles = []  # Track bubbles for font size updates
         
         # Initialize components
         self.recorder = AudioRecorder()
@@ -310,6 +465,7 @@ class MainWindow(QMainWindow):
         # Setup UI
         self.init_ui()
         self.setStyleSheet(GEMINI_STYLE)
+        self.apply_font_size()  # Apply saved font size
         
         # Recording animation timer
         self.pulse_timer = QTimer()
@@ -340,17 +496,42 @@ class MainWindow(QMainWindow):
         available_models = get_available_ollama_models()
         self.model_selector.addItems(available_models)
         
-        # Set current model
-        if self.ai_manager:
-            current = self.ai_manager.ollama_model
-            idx = self.model_selector.findText(current)
+        # Set model from preferences or use first available
+        saved_model = self.preferences.get("model")
+        if saved_model and saved_model in available_models:
+            idx = self.model_selector.findText(saved_model)
             if idx >= 0:
                 self.model_selector.setCurrentIndex(idx)
+                if self.ai_manager:
+                    self.ai_manager.ollama_model = saved_model
+        elif available_models:
+            # Use first available model as default
+            self.model_selector.setCurrentIndex(0)
+            if self.ai_manager:
+                self.ai_manager.ollama_model = available_models[0]
         
         self.model_selector.currentTextChanged.connect(self.on_model_changed)
         header_layout.addWidget(self.model_selector)
         
         header_layout.addStretch()
+        
+        # Settings button (top right)
+        settings_btn = QPushButton("⚙️")
+        settings_btn.setObjectName("settingsButton")
+        settings_btn.setFixedSize(40, 40)
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 20px;
+                font-size: 20px;
+            }
+            QPushButton:hover {
+                background-color: #3C4043;
+            }
+        """)
+        settings_btn.clicked.connect(self.open_settings)
+        header_layout.addWidget(settings_btn)
         
         main_layout.addWidget(header)
         
@@ -611,6 +792,48 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Ready")
             return
         
+        # If auto_send is disabled, transcribe and put in text field
+        if not self.auto_send:
+            self.status_label.setText("Transcribing...")
+            self.mic_btn.setEnabled(False)
+            self.send_btn.setEnabled(False)
+            
+            # Transcribe in a background thread
+            def transcribe_only():
+                text = self.ai_manager.transcribe(audio_data)
+                return text
+            
+            # Use QTimer to run transcription without blocking
+            import concurrent.futures
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(transcribe_only)
+            
+            def on_transcribe_done():
+                try:
+                    transcribed_text = future.result(timeout=0.1)
+                    if transcribed_text:
+                        self.text_input.setText(transcribed_text)
+                        self.text_input.setFocus()
+                        self.status_label.setText("Review and send")
+                    else:
+                        self.status_label.setText("Ready")
+                except concurrent.futures.TimeoutError:
+                    # Not ready yet, check again
+                    QTimer.singleShot(100, on_transcribe_done)
+                    return
+                except Exception as e:
+                    print(f"Transcription error: {e}")
+                    self.status_label.setText("Ready")
+                finally:
+                    if future.done():
+                        self.mic_btn.setEnabled(True)
+                        self.send_btn.setEnabled(True)
+                        executor.shutdown(wait=False)
+            
+            QTimer.singleShot(100, on_transcribe_done)
+            return
+        
+        # Auto-send mode (original behavior)
         self.is_processing = True
         self.mic_btn.setEnabled(False)
         self.status_label.setText("Processing...")
@@ -642,6 +865,61 @@ class MainWindow(QMainWindow):
         self.mic_btn.setEnabled(True)  # Enable to allow interruption
         self.mic_btn.setText("⏹️")  # Change to stop icon
     
+    def open_settings(self):
+        """Open settings dialog"""
+        dialog = SettingsDialog(self, self.auto_send, self.font_size_name)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.auto_send = dialog.get_auto_send()
+            new_font_size = dialog.get_font_size()
+            
+            # Update font size if changed
+            if new_font_size != self.font_size_name:
+                self.font_size_name = new_font_size
+                self.apply_font_size()
+            
+            # Save preferences
+            self.preferences["auto_send"] = self.auto_send
+            self.preferences["font_size"] = self.font_size_name
+            save_preferences(self.preferences)
+            
+            mode_name = "Auto-send" if self.auto_send else "Manual review"
+            print(f"⚙️ Settings updated - Mode: {mode_name}, Font: {self.font_size_name}")
+    
+    def apply_font_size(self):
+        """Apply font size to all UI elements"""
+        font_config = get_font_size_config(self.font_size_name)
+        
+        # Update existing bubbles
+        for bubble in self.chat_bubbles:
+            if bubble:
+                try:
+                    bubble.update_font_size(font_config["bubble_text"])
+                except RuntimeError:
+                    pass  # Widget was deleted
+        
+        # Update input field
+        self.text_input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: #282A2C;
+                color: #E3E3E3;
+                border: 1px solid #3C4043;
+                border-radius: 20px;
+                padding: 12px 18px;
+                font-size: {font_config["input_text"]}px;
+            }}
+            QLineEdit:focus {{
+                border-color: #8AB4F8;
+            }}
+        """)
+        
+        # Update status label
+        self.status_label.setStyleSheet(f"""
+            color: #9AA0A6;
+            font-size: {font_config["status_text"]}px;
+            padding: 8px 16px;
+            background: transparent;
+        """)
+    
     @pyqtSlot(str)
     def update_status(self, status):
         """Update status label"""
@@ -654,16 +932,22 @@ class MainWindow(QMainWindow):
             self.ai_manager.ollama_model = model_name
             print(f"Switched to: {model_name}")
             self.add_bot_message(f"[Model: {model_name}]")
+            # Save preference
+            self.preferences["model"] = model_name
+            save_preferences(self.preferences)
     
     @pyqtSlot(str)
     def add_user_message(self, message):
         """Add user bubble"""
         wrapper = QWidget()
         wrapper_layout = QHBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(60, 0, 12, 0)
+        # Use percentage margins for responsive design
+        wrapper_layout.setContentsMargins(40, 0, 12, 0)
         wrapper_layout.addStretch()
         
-        bubble = ChatBubble(message, is_user=True)
+        font_config = get_font_size_config(self.font_size_name)
+        bubble = ChatBubble(message, is_user=True, font_size=font_config["bubble_text"])
+        self.chat_bubbles.append(bubble)
         wrapper_layout.addWidget(bubble)
         
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
@@ -674,9 +958,12 @@ class MainWindow(QMainWindow):
         """Add bot bubble"""
         wrapper = QWidget()
         wrapper_layout = QHBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(12, 0, 60, 0)
+        # Use percentage margins for responsive design
+        wrapper_layout.setContentsMargins(12, 0, 40, 0)
         
-        bubble = ChatBubble(message, is_user=False)
+        font_config = get_font_size_config(self.font_size_name)
+        bubble = ChatBubble(message, is_user=False, font_size=font_config["bubble_text"])
+        self.chat_bubbles.append(bubble)
         wrapper_layout.addWidget(bubble)
         wrapper_layout.addStretch()
         
@@ -697,6 +984,9 @@ class MainWindow(QMainWindow):
             item = self.chat_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        
+        # Clear bubbles list
+        self.chat_bubbles.clear()
         
         if self.ai_manager:
             self.ai_manager.reset_conversation()

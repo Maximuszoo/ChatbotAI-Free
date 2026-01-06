@@ -49,6 +49,9 @@ venv.bak/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# User preferences
+user_preferences.json
+
 # PyCharm
 .idea/
 

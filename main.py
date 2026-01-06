@@ -5,6 +5,8 @@ Walkie-Talkie Mode: Manual control of recording
 
 import sys
 import numpy as np
+import threading
+import queue
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QHBoxLayout, QLabel, QScrollArea, QPushButton, 
@@ -147,30 +149,62 @@ class WorkerThread(QThread):
             self.processing_complete.emit()
             return
         
-        # Step 3: Generate and play speech by paragraphs for faster response
+        # Step 3: Generate and play speech by paragraphs with parallel processing
         self.status_changed.emit("Speaking...")
         self.speaking_started.emit()  # Notify UI that speaking started
         
         # Split text into paragraphs
         paragraphs = self._split_into_paragraphs(bot_text)
         
-        for i, paragraph in enumerate(paragraphs):
+        # Create a queue for audio chunks
+        audio_queue = queue.Queue(maxsize=3)  # Buffer up to 3 paragraphs
+        generation_complete = threading.Event()
+        
+        # Thread function to generate audio chunks in parallel
+        def generate_audio():
+            for i, paragraph in enumerate(paragraphs):
+                if self.interrupted:
+                    break
+                
+                # Clean markdown from paragraph
+                clean_text = self._clean_markdown(paragraph)
+                
+                if not clean_text.strip():
+                    continue
+                
+                # Generate audio for this paragraph
+                audio_output, sample_rate = self.ai_manager.text_to_speech(clean_text)
+                
+                if audio_output is not None and len(audio_output) > 0:
+                    # Put audio in queue (will block if queue is full)
+                    try:
+                        audio_queue.put((audio_output, sample_rate), timeout=1.0)
+                    except queue.Full:
+                        if self.interrupted:
+                            break
+            
+            generation_complete.set()
+        
+        # Start generation thread
+        gen_thread = threading.Thread(target=generate_audio, daemon=True)
+        gen_thread.start()
+        
+        # Play audio chunks as they become available
+        while not (generation_complete.is_set() and audio_queue.empty()):
             if self.interrupted:
                 break
             
-            # Clean markdown from paragraph
-            clean_text = self._clean_markdown(paragraph)
-            
-            if not clean_text.strip():
+            try:
+                audio_output, sample_rate = audio_queue.get(timeout=0.5)
+                if not self.interrupted:
+                    self.audio_player.play(audio_output, sample_rate)
+            except queue.Empty:
+                if generation_complete.is_set():
+                    break
                 continue
-            
-            # Generate and play audio for this paragraph
-            audio_output, sample_rate = self.ai_manager.text_to_speech(clean_text)
-            
-            if audio_output is not None and len(audio_output) > 0 and not self.interrupted:
-                self.audio_player.play(audio_output, sample_rate)
-            else:
-                break
+        
+        # Wait for generation thread to finish
+        gen_thread.join(timeout=1.0)
         
         self.status_changed.emit("Ready")
         self.processing_complete.emit()

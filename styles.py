@@ -205,6 +205,83 @@ QLabel#recordingDot {
     min-height: 12px;
     max-height: 12px;
 }
+
+/* ===== LIVE MODE ===== */
+QWidget#liveModeWidget {
+    background-color: #131314;
+}
+
+QWidget#liveIndicatorContainer {
+    background-color: transparent;
+}
+
+QLabel#liveStateLabel {
+    color: #9AA0A6;
+    font-size: 16px;
+    font-weight: bold;
+    background: transparent;
+}
+
+QLabel#liveTranscriptLabel {
+    color: #E3E3E3;
+    font-size: 14px;
+    background: transparent;
+    padding: 20px;
+}
+
+QPushButton#liveMuteButton {
+    background-color: #282A2C;
+    color: #E3E3E3;
+    border: 2px solid #3C4043;
+    border-radius: 35px;
+    min-width: 70px;
+    max-width: 70px;
+    min-height: 70px;
+    max-height: 70px;
+    font-size: 28px;
+}
+
+QPushButton#liveMuteButton:hover {
+    background-color: #3C4043;
+    border-color: #5F6368;
+}
+
+QPushButton#liveMuteButton:checked {
+    background-color: #EA4335;
+    border-color: #EA4335;
+}
+
+QPushButton#liveExitButton {
+    background-color: #EA4335;
+    color: white;
+    border: none;
+    border-radius: 35px;
+    min-width: 70px;
+    max-width: 70px;
+    min-height: 70px;
+    max-height: 70px;
+    font-size: 28px;
+}
+
+QPushButton#liveExitButton:hover {
+    background-color: #F44336;
+}
+
+QPushButton#liveStartButton {
+    background-color: #1A73E8;
+    color: white;
+    border: none;
+    border-radius: 30px;
+    min-width: 60px;
+    max-width: 60px;
+    min-height: 60px;
+    max-height: 60px;
+    font-size: 24px;
+}
+
+QPushButton#liveStartButton:hover {
+    background-color: #4285F4;
+}
 """
 
 # For backwards compatibility

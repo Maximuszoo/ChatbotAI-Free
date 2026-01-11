@@ -12,8 +12,13 @@ I created this chatbot as a personal tool to:
 **Normal mode**
 <img width="1082" height="799" alt="Captura de pantalla_20260106_172859" src="https://github.com/user-attachments/assets/0030e384-f9c8-47ee-aa90-2c4a955bc27b" />
 
+https://github.com/user-attachments/assets/56a0d0cb-73ae-42df-8c5a-3f0938419d29
+
 **Live mode**
 <img width="1083" height="799" alt="Captura de pantalla_20260106_172956" src="https://github.com/user-attachments/assets/33e8d5dc-4310-4248-ba22-4b16085958b9" />
+
+https://github.com/user-attachments/assets/c33bd6a7-a4ae-48cf-89c5-c72d019a0d53
+
 ---
 
 ## Features ✨
